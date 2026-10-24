@@ -13,11 +13,6 @@ on:
   push:
     branches: [main]
 
-
-concurrency:
-  group: oci-arm-catcher
-  cancel-in-progress: false
-
 jobs:
   attempt:
     runs-on: ubuntu-latest
@@ -95,6 +90,9 @@ jobs:
           elif grep -q 'Out of host capacity' launch_err.txt; then
             echo "result=capacity" >> "$GITHUB_OUTPUT"
             echo "Out of host capacity — will retry next run."
+          elif grep -q 'TooManyRequests' launch_err.txt; then
+            echo "result=retry" >> "$GITHUB_OUTPUT"
+            echo "Rate limited — will retry next run."
           else
             echo "result=error" >> "$GITHUB_OUTPUT"
             cat launch_err.txt
