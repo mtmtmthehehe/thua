@@ -1,17 +1,13 @@
 name: OCI ARM slot catcher
 
-# San slot Oracle Always Free: VM.Standard.A1.Flex, 2 OCPU / 12GB, ap-singapore-1.
-# Moi luot chay = 1 lan thu tao instance arm-free-max.
-# - Het slot: Oracle tra "Out of host capacity", job thoat binh thuong, luot sau thu lai.
-# - Trung slot: job lay public IP, mo rong boot volume len 200GB, mo issue bao
-#   OCID + IP. Cac luot sau tu bo qua nho buoc kiem tra instance da ton tai.
-
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
   push:
     branches: [main]
+
+concurrency:
+  group: oci-arm-hunt
+  cancel-in-progress: false
 
 jobs:
   attempt:
@@ -53,12 +49,12 @@ jobs:
           id=$(oci compute instance list \
             --compartment-id "$OCI_TENANCY_OCID" \
             --display-name arm-free-max \
-            --lifecycle-state RUNNING \
-            --lifecycle-state PROVISIONING \
-            --query 'data[0].id' --raw-output 2>/dev/null || true)
+            --all \
+            --query 'data[?"lifecycle-state"!=`"TERMINATED"` && "lifecycle-state"!=`"TERMINATING"`] | [0].id' \
+            --raw-output 2>/dev/null || true)
           if [ -n "$id" ] && [ "$id" != "null" ]; then
-            echo "id=$id" >> "$GITHUB_OUTPUT"
-            echo "Instance already exists: $id — skipping launch."
+            echo "Instance already exists — failing run so only a fresh creation counts as success."
+            exit 1
           else
             echo "id=" >> "$GITHUB_OUTPUT"
           fi
@@ -86,32 +82,26 @@ jobs:
           if [ -n "$ocid" ] && [ "$ocid" != "null" ]; then
             echo "result=created" >> "$GITHUB_OUTPUT"
             echo "ocid=$ocid" >> "$GITHUB_OUTPUT"
-            echo "Created: $ocid"
+            echo "Instance created."
           elif grep -q 'Out of host capacity' launch_err.txt; then
-            echo "result=capacity" >> "$GITHUB_OUTPUT"
-            echo "Out of host capacity — will retry next run."
+            echo "Out of host capacity — failing run (no instance created)."
+            exit 1
           elif grep -q 'TooManyRequests' launch_err.txt; then
-            echo "result=retry" >> "$GITHUB_OUTPUT"
-            echo "Rate limited — will retry next run."
+            echo "Rate limited (TooManyRequests) — failing run (no instance created)."
+            exit 1
           else
-            echo "result=error" >> "$GITHUB_OUTPUT"
+            echo "Launch failed — failing run (no instance created)."
             cat launch_err.txt
             exit 1
           fi
 
-      - name: On success - get IP, resize boot volume, open issue
+      - name: On success - resize boot volume, open signal issue
         if: steps.launch.outputs.result == 'created'
         env:
           GH_TOKEN: ${{ github.token }}
           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
           OCID: ${{ steps.launch.outputs.ocid }}
         run: |
-          vnic=$(oci compute instance list-vnic-attachments \
-            --compartment-id "$OCI_TENANCY_OCID" \
-            --instance-id "$OCID" \
-            --query 'data[0]."vnic-id"' --raw-output)
-          ip=$(oci network vnic get --vnic-id "$vnic" --query 'data."public-ip"' --raw-output)
-          echo "Public IP: $ip"
           # Mo rong boot volume len 200GB (muc free toi da). Loi thi bo qua, lam tay sau.
           bvid=$(oci compute boot-volume-attachment list \
             --compartment-id "$OCI_TENANCY_OCID" \
@@ -121,11 +111,11 @@ jobs:
             oci bv boot-volume update --boot-volume-id "$bvid" --size-in-gbs 200 \
               || echo "Boot volume resize skipped (will do manually)."
           fi
+          # Chi mo issue bao tin hieu, KHONG ghi IP hay OCID vi repo public, ai cung doc duoc.
+          # IP lay trong OCI Console: Compute -> Instances -> arm-free-max -> Public IP.
           gh issue create \
             --title "VPS Oracle free da tao thanh cong" \
-            --body "Instance arm-free-max da duoc tao.
-          - OCID: $OCID
-          - Shape: VM.Standard.A1.Flex, 2 OCPU / 12GB RAM, Ubuntu 24.04
-          - Public IP: $ip
-          - SSH: ssh -i <private-key> ubuntu@$ip
-          Sau khi thay issue nay: tat workflow nay di (Actions -> workflow -> Disable), roi bao cho agent de nhan private key va kiem tra lai."
+            --body "Instance arm-free-max da duoc tao (VM.Standard.A1.Flex, 2 OCPU / 12GB RAM). Boot volume se duoc mo rong len 200GB, neu loi thi lam tay sau.
+          Khong ghi IP/OCID o day vi repo public.
+          Lay IP trong OCI Console: Compute -> Instances -> arm-free-max -> Public IP, roi SSH bang private key cua m.
+          Viec can lam ngay: tat workflow nay (Actions -> workflow -> Disable) va tat cronjob dispatch."
