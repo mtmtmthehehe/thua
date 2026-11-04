@@ -105,7 +105,7 @@ jobs:
           fi
           exit 0
 
-      - name: Resize boot volume to 200GB
+      - name: Resize boot volume to 100GB
         if: steps.launch.outputs.result == 'created'
         continue-on-error: true
         env:
@@ -124,7 +124,7 @@ jobs:
             sleep 20
           done
           if [ -n "$bvid" ] && [ "$bvid" != "null" ]; then
-            oci bv boot-volume update --boot-volume-id "$bvid" --size-in-gbs 200 \
+            oci bv boot-volume update --boot-volume-id "$bvid" --size-in-gbs 100 \
               && echo "RESIZED=yes" >> "$GITHUB_ENV" \
               || { echo "::warning title=Boot volume resize failed::Lam tay trong OCI Console"; echo "RESIZED=no" >> "$GITHUB_ENV"; }
           else
@@ -146,7 +146,7 @@ jobs:
             fi
           fi
           if [ "${RESIZED:-no}" = "yes" ]; then
-            vol="Boot volume da duoc mo rong len 200GB."
+            vol="Boot volume da duoc mo rong len 100GB."
           else
             vol="Boot volume CHUA mo rong duoc, lam tay trong OCI Console."
           fi
