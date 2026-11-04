@@ -9,6 +9,12 @@ concurrency:
   group: oci-arm-hunt
   cancel-in-progress: false
 
+env:
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}   # bat buoc: job khong checkout nen gh khong tu biet repo
+  SUCCESS_TITLE: "VPS Oracle free da tao thanh cong"
+  ERROR_TITLE: "OCI workflow loi can sua"
+
 jobs:
   attempt:
     runs-on: ubuntu-latest
@@ -41,26 +47,32 @@ jobs:
           printf '%s\n' "$OCI_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
 
+      # state = none (chua co) | exists (da co) | error (khong kiem tra duoc)
       - name: Check if instance already exists
         id: existing
         env:
           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
         run: |
-          id=$(oci compute instance list \
-            --compartment-id "$OCI_TENANCY_OCID" \
-            --display-name arm-free-max \
-            --all \
-            --query 'data[?"lifecycle-state"!=`"TERMINATED"` && "lifecycle-state"!=`"TERMINATING"`] | [0].id' \
-            --raw-output 2>/dev/null || true)
-          if [ -n "$id" ] && [ "$id" != "null" ]; then
-            echo "Instance already exists — failing run so only a fresh creation counts as success."
-            exit 1
+          if id=$(oci compute instance list \
+              --compartment-id "$OCI_TENANCY_OCID" \
+              --display-name arm-free-max \
+              --all \
+              --query 'data[?"lifecycle-state"!=`"TERMINATED"` && "lifecycle-state"!=`"TERMINATING"`] | [0].id' \
+              --raw-output 2>/tmp/check_err.txt); then
+            if [ -n "$id" ] && [ "$id" != "null" ]; then
+              echo "state=exists" >> "$GITHUB_OUTPUT"
+            else
+              echo "state=none" >> "$GITHUB_OUTPUT"
+            fi
           else
-            echo "id=" >> "$GITHUB_OUTPUT"
+            # loi auth / cau hinh / mang. Xoa OCID truoc khi luu vi repo public.
+            sed -E 's/ocid1\.[A-Za-z0-9._-]+/<ocid>/g' /tmp/check_err.txt | head -n 25 > /tmp/oci_error.txt
+            echo "state=error" >> "$GITHUB_OUTPUT"
           fi
 
+      # result = created | capacity | ratelimit | error. Luon exit 0 de cac buoc sau chay; buoc cuoi moi quyet dinh do/xanh.
       - name: Try to launch instance
-        if: steps.existing.outputs.id == ''
+        if: steps.existing.outputs.state == 'none'
         id: launch
         env:
           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
@@ -78,44 +90,128 @@ jobs:
             --subnet-id "$OCI_SUBNET_OCID" \
             --assign-public-ip true \
             --metadata "{\"ssh_authorized_keys\": \"$SSH_PUBKEY\"}" \
-            --query 'data.id' --raw-output 2>launch_err.txt)
+            --query 'data.id' --raw-output 2>/tmp/launch_err.txt)
+          sed -E 's/ocid1\.[A-Za-z0-9._-]+/<ocid>/g' /tmp/launch_err.txt | head -n 25 > /tmp/oci_error.txt
+
           if [ -n "$ocid" ] && [ "$ocid" != "null" ]; then
             echo "result=created" >> "$GITHUB_OUTPUT"
             echo "ocid=$ocid" >> "$GITHUB_OUTPUT"
-            echo "Instance created."
-          elif grep -q 'Out of host capacity' launch_err.txt; then
-            echo "Out of host capacity — failing run (no instance created)."
-            exit 1
-          elif grep -q 'TooManyRequests' launch_err.txt; then
-            echo "Rate limited (TooManyRequests) — failing run (no instance created)."
-            exit 1
+          elif grep -qi 'Out of host capacity' /tmp/launch_err.txt; then
+            echo "result=capacity" >> "$GITHUB_OUTPUT"
+          elif grep -qiE 'TooManyRequests|"status": 429' /tmp/launch_err.txt; then
+            echo "result=ratelimit" >> "$GITHUB_OUTPUT"
           else
-            echo "Launch failed — failing run (no instance created)."
-            cat launch_err.txt
-            exit 1
+            echo "result=error" >> "$GITHUB_OUTPUT"
           fi
+          exit 0
 
-      - name: On success - resize boot volume, open signal issue
+      - name: Resize boot volume to 200GB
         if: steps.launch.outputs.result == 'created'
+        continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
           OCID: ${{ steps.launch.outputs.ocid }}
         run: |
-          # Mo rong boot volume len 200GB (muc free toi da). Loi thi bo qua, lam tay sau.
-          bvid=$(oci compute boot-volume-attachment list \
-            --compartment-id "$OCI_TENANCY_OCID" \
-            --instance-id "$OCID" \
-            --query 'data[0]."boot-volume-id"' --raw-output 2>/dev/null || true)
+          # Co the chua attach ngay sau khi launch, thu lai vai lan.
+          bvid=""
+          for i in 1 2 3 4 5 6; do
+            bvid=$(oci compute boot-volume-attachment list \
+              --compartment-id "$OCI_TENANCY_OCID" \
+              --availability-domain 'Ihvr:AP-SINGAPORE-1-AD-1' \
+              --instance-id "$OCID" \
+              --query 'data[0]."boot-volume-id"' --raw-output 2>/dev/null || true)
+            [ -n "$bvid" ] && [ "$bvid" != "null" ] && break
+            sleep 20
+          done
           if [ -n "$bvid" ] && [ "$bvid" != "null" ]; then
             oci bv boot-volume update --boot-volume-id "$bvid" --size-in-gbs 200 \
-              || echo "Boot volume resize skipped (will do manually)."
+              && echo "RESIZED=yes" >> "$GITHUB_ENV" \
+              || { echo "::warning title=Boot volume resize failed::Lam tay trong OCI Console"; echo "RESIZED=no" >> "$GITHUB_ENV"; }
+          else
+            echo "::warning title=Boot volume not found::Lam tay trong OCI Console"
+            echo "RESIZED=no" >> "$GITHUB_ENV"
           fi
-          # Chi mo issue bao tin hieu, KHONG ghi IP hay OCID vi repo public, ai cung doc duoc.
-          # IP lay trong OCI Console: Compute -> Instances -> arm-free-max -> Public IP.
-          gh issue create \
-            --title "VPS Oracle free da tao thanh cong" \
-            --body "Instance arm-free-max da duoc tao (VM.Standard.A1.Flex, 2 OCPU / 12GB RAM). Boot volume se duoc mo rong len 200GB, neu loi thi lam tay sau.
-          Khong ghi IP/OCID o day vi repo public.
-          Lay IP trong OCI Console: Compute -> Instances -> arm-free-max -> Public IP, roi SSH bang private key cua m.
-          Viec can lam ngay: tat workflow nay (Actions -> workflow -> Disable) va tat cronjob dispatch."
+
+      # Mo issue khi VPS vua tao xong, hoac khi phat hien VPS da ton tai ma chua co issue (luoi an toan).
+      - name: Open success issue
+        if: steps.launch.outputs.result == 'created' || steps.existing.outputs.state == 'exists'
+        env:
+          STATE: ${{ steps.existing.outputs.state }}
+        run: |
+          if [ "$STATE" = "exists" ]; then
+            n=$(gh issue list --state all --search "\"$SUCCESS_TITLE\" in:title" --json number --jq length)
+            if [ "$n" != "0" ]; then
+              echo "Success issue already exists, skipping."
+              exit 0
+            fi
+          fi
+          if [ "${RESIZED:-no}" = "yes" ]; then
+            vol="Boot volume da duoc mo rong len 200GB."
+          else
+            vol="Boot volume CHUA mo rong duoc, lam tay trong OCI Console."
+          fi
+          {
+            echo "Instance arm-free-max (VM.Standard.A1.Flex, 2 OCPU / 12GB RAM) da ton tai ($(date -u '+%Y-%m-%d %H:%M UTC'))."
+            echo
+            echo "$vol"
+            echo
+            echo "Khong ghi IP/OCID o day vi repo public."
+            echo "Lay IP trong OCI Console: Compute -> Instances -> arm-free-max -> Public IP, roi SSH bang private key cua m."
+            echo
+            echo "Viec can lam ngay: tat workflow nay (Actions -> workflow -> Disable) va tat cronjob dispatch."
+          } > /tmp/body.md
+          gh issue create --title "$SUCCESS_TITLE" --body-file /tmp/body.md
+
+      # Loi that (khong phai het slot / rate limit): mo 1 issue, khong spam neu da co issue dang mo.
+      - name: Open error issue
+        if: steps.existing.outputs.state == 'error' || steps.launch.outputs.result == 'error'
+        env:
+          WHERE: ${{ steps.existing.outputs.state == 'error' && 'kiem tra instance (oci compute instance list)' || 'tao instance (oci compute instance launch)' }}
+        run: |
+          n=$(gh issue list --state open --search "\"$ERROR_TITLE\" in:title" --json number --jq length)
+          if [ "$n" != "0" ]; then
+            echo "Error issue already open, skipping."
+            exit 0
+          fi
+          {
+            echo "Workflow gap loi o buoc: $WHERE"
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "Loi tu OCI (da xoa OCID):"
+            echo '```'
+            cat /tmp/oci_error.txt
+            echo '```'
+            echo
+            echo "Cac loi thuong gap: sai fingerprint/private key (401 NotAuthenticated), sai OCID/subnet/image (404 NotAuthorizedOrNotFound), sai availability domain."
+            echo "Het slot (Out of host capacity) va rate limit KHONG tao issue, do la binh thuong."
+          } > /tmp/err_body.md
+          gh issue create --title "$ERROR_TITLE" --body-file /tmp/err_body.md
+
+      # Buoc cuoi: chi xanh khi VPS vua duoc tao. Moi truong hop khac do voi ly do ro rang.
+      - name: Final status
+        if: always()
+        env:
+          STATE: ${{ steps.existing.outputs.state }}
+          RESULT: ${{ steps.launch.outputs.result }}
+        run: |
+          summary() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          if [ "$RESULT" = "created" ]; then
+            summary "### CREATED - VPS da tao thanh cong, xem issue moi trong tab Issues"
+            exit 0
+          elif [ "$STATE" = "exists" ]; then
+            summary "### EXISTS - instance arm-free-max da ton tai, khong tao them. Hay tat workflow."
+            echo "::error title=Instance already exists::arm-free-max da ton tai. Tat workflow nay."
+          elif [ "$RESULT" = "capacity" ]; then
+            summary "### NO CAPACITY - Out of host capacity, thu lai lan sau (binh thuong)"
+            echo "::error title=Out of host capacity::OCI het slot ARM o AD-1. Khong co gi sai, cho lan chay sau."
+          elif [ "$RESULT" = "ratelimit" ]; then
+            summary "### RATE LIMITED - OCI tra TooManyRequests, giam tan suat dispatch"
+            echo "::error title=Rate limited::OCI TooManyRequests (429). Giam tan suat chay."
+          else
+            summary "### REAL ERROR - khong phai het slot, can sua cau hinh"
+            summary '```'
+            summary "$(cat /tmp/oci_error.txt 2>/dev/null)"
+            summary '```'
+            echo "::error title=OCI error::$(head -c 400 /tmp/oci_error.txt 2>/dev/null | tr '\n' ' ')"
+          fi
+          exit 1
