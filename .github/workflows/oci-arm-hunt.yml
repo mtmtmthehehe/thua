@@ -85,7 +85,7 @@ jobs:
             --compartment-id "$OCI_TENANCY_OCID" \
             --display-name arm-free-max \
             --shape VM.Standard.A1.Flex \
-            --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+            --shape-config '{"ocpus":1,"memoryInGBs":6}' \
             --image-id 'ocid1.image.oc1.ap-singapore-1.aaaaaaaaw75ef2chh5goomskvdznqz36cadczqelqvndbqcozc5icyig57za' \
             --subnet-id "$OCI_SUBNET_OCID" \
             --assign-public-ip true \
@@ -151,7 +151,7 @@ jobs:
             vol="Boot volume CHUA mo rong duoc, lam tay trong OCI Console."
           fi
           {
-            echo "Instance arm-free-max (VM.Standard.A1.Flex, 2 OCPU / 12GB RAM) da ton tai ($(date -u '+%Y-%m-%d %H:%M UTC'))."
+            echo "Instance arm-free-max (VM.Standard.A1.Flex, 1 OCPU / 6GB RAM) da ton tai ($(date -u '+%Y-%m-%d %H:%M UTC'))."
             echo
             echo "$vol"
             echo
