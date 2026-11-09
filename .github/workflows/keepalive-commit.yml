@@ -1,0 +1,39 @@
+# Chong GitHub tat schedule sau 60 ngay repo khong co commit.
+#
+# GitHub tu dong disable workflow co schedule neu repo khong co commit nao
+# trong 60 ngay (gui 1 email roi tat im lam). Khi bi disable, workflow_dispatch
+# tu cron ngoai CUNG KHONG chay duoc - phai enable tay. Workflow nay push 1
+# empty commit vao dau moi thang => repo luon "active", ca hai schedule
+# (oci-arm-hunt + workflow nay) khong bao gio bi tat.
+#
+# Empty commit khong sua gi, khong kich chay workflow khac (GITHUB_TOKEN push
+# khong gan [skip ci] van khong trigger CI khac vi khong co file thay doi).
+
+name: keepalive - anti 60-day disable
+
+on:
+  schedule:
+    - cron: "37 3 2 * *" # 03:37 UTC ngay 2 hang thang (som hon muc 60 ngay)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keepalive-commit
+
+jobs:
+  empty-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push empty commit de reset bo dem 60 ngay
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive $(date -u +%Y-%m-%d) [skip ci]"
+          git push
