@@ -1,4 +1,4 @@
-name: OCI free slot catcher (v5 - A1 song song Micro)
+name: OCI free slot catcher
 
 on:
   workflow_dispatch:
@@ -26,10 +26,6 @@ env:
   SUCCESS_TITLE: "VPS Oracle free da tao thanh cong"
   ERROR_TITLE: "OCI workflow loi can sua"
 
-# Hai pool Always Free RIEN BIET (khong tru vao nhau):
-# - A1 (ARM):   2 OCPU / 12GB tong cong (han muc moi tu 08/2026) -> instance1
-# - E2.1.Micro: 2 instance (1/8 OCPU burst, 1GB RAM moi cai)      -> micro1
-# Chung duy nhat: 200GB block volume, 10TB bandwidth/thang, 5 volume backup.
 
 jobs:
   # ============================================================
@@ -51,10 +47,9 @@ jobs:
       AD: 'Ihvr:AP-SINGAPORE-1-AD-1'
       INSTANCE_NAME: instance1
       FALLBACK_IMG_ARM: 'ocid1.image.oc1.ap-singapore-1.aaaaaaaaw75ef2chh5goomskvdznqz36cadczqelqvndbqcozc5icyig57za'
-      # Thu nho truoc (de thang nhat), xong xoay sang to. Tong pool moi: 2 OCPU / 12GB.
       SHAPES: |
         {"ocpus":1,"memoryInGBs":2}
-        {"ocpus":2,"memoryInGBs":12}
+      STAGGER_SEC: '0'
       ATTEMPT_INTERVAL_SEC: '120'
       RATELIMIT_BACKOFF_SEC: '600'
       LOOP_MINUTES: '330'
@@ -72,16 +67,49 @@ jobs:
           OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.oci
+          # Lam sach secret: bo \r (paste tu Windows), khoang trang 2 dau,
+          # dau nhay " ' bao quanh, tien to 'user = '/'fingerprint = ' (copy lan
+          # ca ten key tu ~/.oci/config), dau . , ; duoi - nguyen nhan khien
+          # config bi 'malformed'.
+          clean() {
+            printf '%s' "$1" | tr -d '\r' | sed -E -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" -e 's/^(user|tenancy|fingerprint|key)[[:space:]]*=[[:space:]]*//I' -e 's/[.,;]+$//'
+          }
+          U=$(clean "$OCI_USER_OCID")
+          T=$(clean "$OCI_TENANCY_OCID")
+          F=$(clean "$OCI_FINGERPRINT")
+          K=$(printf '%s' "$OCI_PRIVATE_KEY" | tr -d '\r')
+          # Neu key chi la 1 dong (chua co xuong dong that) ma chua chuoi \n thi tach dong
+          [[ $K == *$'\n'* ]] || K=$(printf '%s' "$K" | sed 's/\\n/\n/g')
+          printf '%s\n' "$K" > ~/.oci/oci_api_key.pem
           cat > ~/.oci/config <<EOF
           [DEFAULT]
-          user=$OCI_USER_OCID
-          fingerprint=$OCI_FINGERPRINT
-          tenancy=$OCI_TENANCY_OCID
+          user=$U
+          fingerprint=$F
+          tenancy=$T
           region=$REGION
-          key_file=~/.oci/oci_api_key.pem
+          key_file=$HOME/.oci/oci_api_key.pem
           EOF
-          printf '%s\n' "$OCI_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
+          # Chuan doan an toan: chi do dai + dinh dang, KHONG in du lieu thiet
+          re_ocid='^ocid1\.[a-z0-9]+\.[a-z0-9-]*\.\.'
+          re_fp='^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){15}$'
+          {
+            echo "diag user:        len=${#U} ocid=$([[ $U =~ $re_ocid ]] && echo ok || echo BAD)"
+            echo "diag tenancy:     len=${#T} ocid=$([[ $T =~ $re_ocid ]] && echo ok || echo BAD)"
+            echo "diag fingerprint: len=${#F} fmt=$([[ $F =~ $re_fp ]] && echo ok || echo BAD)"
+            echo "diag key:         len=${#K} pem=$([[ $K == -----BEGIN* ]] && echo ok || echo BAD)"
+          } | tee /tmp/diag.txt
+          # Fail-fast: secret loi thi ket thuc sau 5s thay vi dot vong 5h30 vo ich.
+          BAD=""
+          [[ $U =~ $re_ocid ]]    || BAD="$BAD OCI_USER_OCID(len=${#U})"
+          [[ $T =~ $re_ocid ]]    || BAD="$BAD OCI_TENANCY_OCID(len=${#T})"
+          [[ $F =~ $re_fp   ]]    || BAD="$BAD OCI_FINGERPRINT(len=${#F})"
+          [[ $K == -----BEGIN* ]] || BAD="$BAD OCI_PRIVATE_KEY(len=${#K})"
+          if [ -n "$BAD" ]; then
+            echo "::error::Cac secret sau sai dinh dang hoac de trong:$BAD"
+            echo "::error::Sua tai Settings > Secrets and variables > Actions > Repository secrets. Gia tri CHI lay phan gia tri: dong 'user=ocid1.user.oc1..xxxx' trong ~/.oci/config thi chi paste 'ocid1.user.oc1..xxxx'. Ten secret phai chinh xac: OCI_USER_OCID, OCI_TENANCY_OCID, OCI_FINGERPRINT, OCI_PRIVATE_KEY. Len=0 nghia la secret thieu hoac sai ten."
+            exit 1
+          fi
 
       # state = none | exists | error (chi quan tam pool A1)
       - name: Check if A1 already exists
@@ -131,6 +159,13 @@ jobs:
           if [ "$STATE" = "exists" ] || [ -z "${SHAPES// /}" ]; then
             echo "result=nothing" >> "$GITHUB_OUTPUT"; echo "attempts=0" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          # Stagger: pool co STAGGER_SEC > 0 se doi them jitter truoc khi bat dau
+          # loop => request cua 2 pool khong bao gio roinh vao cung mot thoi diem.
+          if [ "${STAGGER_SEC:-0}" != "0" ]; then
+            st=$((STAGGER_SEC + RANDOM % 30))
+            echo "Stagger: cho $st s truoc khi bat dau hunt..."
+            sleep "$st"
+          fi
           end=$(( $(date +%s) + LOOP_MINUTES * 60 ))
           attempt=0
           result="exhausted"
@@ -138,6 +173,7 @@ jobs:
           while [ "$(date +%s)" -lt "$end" ]; do
             while IFS= read -r cfg; do
               [ -z "$cfg" ] && continue
+              [[ ";${SKIP_SHAPES:-};" == *";$cfg;"* ]] && { echo "bo qua shape da vuot quota: $cfg"; continue; }
               attempt=$((attempt + 1))
               echo "::group::Attempt #$attempt [A1 $cfg] $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
               ocid=$(oci compute instance launch \
@@ -159,12 +195,26 @@ jobs:
                 result="created"; ocid_out="$ocid"
                 break 2
               elif grep -qi 'Out of host capacity' /tmp/launch_err.txt; then
-                echo "attempt #$attempt: no capacity, nghi ${ATTEMPT_INTERVAL_SEC}s"
-                sleep "$ATTEMPT_INTERVAL_SEC"
+                cap=$((ATTEMPT_INTERVAL_SEC - 20 + RANDOM % 41))
+                echo "attempt #$attempt: no capacity, nghi ${cap}s (jitter)"
+                sleep "$cap"
               elif grep -qiE 'TooManyRequests|"status": 429' /tmp/launch_err.txt; then
-                echo "attempt #$attempt: rate limited, nghi ${RATELIMIT_BACKOFF_SEC}s"
-                sleep "$RATELIMIT_BACKOFF_SEC"
+                back=$((RATELIMIT_BACKOFF_SEC - 60 + RANDOM % 121))
+                echo "attempt #$attempt: rate limited, nghi ${back}s (jitter)"
+                sleep "$back"
               else
+                if grep -qiE 'LimitExceeded|QuotaExceeded' /tmp/launch_err.txt; then
+                  echo "attempt #$attempt: vuot quota cho shape nay -> bo qua, thu shape khac"
+                  SKIP_SHAPES="${SKIP_SHAPES:-};$cfg"
+                  total=$(printf '%s\n' "$SHAPES" | sed '/^[[:space:]]*$/d' | wc -l)
+                  skipped=$(printf '%s' "${SKIP_SHAPES:-};" | tr ';' '\n' | sed '/^$/d' | wc -l)
+                  if [ "$skipped" -ge "$total" ]; then
+                    echo "Moi shape deu vuot quota -> dung hunt (han muc da bi instance khac chiem?)"
+                    result="exhausted"
+                    break 2
+                  fi
+                  continue
+                fi
                 echo "attempt #$attempt: loi that, dung loop"
                 cp /tmp/oci_error.txt /tmp/oci_error_fatal.txt
                 result="error"
@@ -256,6 +306,8 @@ jobs:
             echo "Cac loi thuong gap: sai fingerprint/private key (401), sai OCID/subnet/image (404), vuot han muc (LimitExceeded)."
             echo "Het slot (Out of host capacity) va rate limit KHONG tao issue, do la binh thuong."
           } > /tmp/err_body.md
+          [ -f /tmp/diag.txt ] && { echo; echo '### Diagnostics (chi do dai/dinh dang, khong co du lieu thiet):'; cat /tmp/diag.txt; } >> /tmp/err_body.md || true
+          [ -f /tmp/diag.txt ] && { echo; echo '### Diagnostics (chi do dai/dinh dang, khong co du lieu thiet):'; cat /tmp/diag.txt; } >> /tmp/err_body.md || true
           gh issue create --title "$ERROR_TITLE" --body-file /tmp/err_body.md
 
       # Chi tu disable khi DU CA HAI pool. Muon hunt lai: Actions -> Enable workflow.
@@ -325,6 +377,7 @@ jobs:
       REGION: ap-singapore-1
       AD: 'Ihvr:AP-SINGAPORE-1-AD-1'
       INSTANCE_NAME: micro1
+      STAGGER_SEC: '165'
       ATTEMPT_INTERVAL_SEC: '120'
       RATELIMIT_BACKOFF_SEC: '600'
       LOOP_MINUTES: '330'
@@ -342,16 +395,49 @@ jobs:
           OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.oci
+          # Lam sach secret: bo \r (paste tu Windows), khoang trang 2 dau,
+          # dau nhay " ' bao quanh, tien to 'user = '/'fingerprint = ' (copy lan
+          # ca ten key tu ~/.oci/config), dau . , ; duoi - nguyen nhan khien
+          # config bi 'malformed'.
+          clean() {
+            printf '%s' "$1" | tr -d '\r' | sed -E -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" -e 's/^(user|tenancy|fingerprint|key)[[:space:]]*=[[:space:]]*//I' -e 's/[.,;]+$//'
+          }
+          U=$(clean "$OCI_USER_OCID")
+          T=$(clean "$OCI_TENANCY_OCID")
+          F=$(clean "$OCI_FINGERPRINT")
+          K=$(printf '%s' "$OCI_PRIVATE_KEY" | tr -d '\r')
+          # Neu key chi la 1 dong (chua co xuong dong that) ma chua chuoi \n thi tach dong
+          [[ $K == *$'\n'* ]] || K=$(printf '%s' "$K" | sed 's/\\n/\n/g')
+          printf '%s\n' "$K" > ~/.oci/oci_api_key.pem
           cat > ~/.oci/config <<EOF
           [DEFAULT]
-          user=$OCI_USER_OCID
-          fingerprint=$OCI_FINGERPRINT
-          tenancy=$OCI_TENANCY_OCID
+          user=$U
+          fingerprint=$F
+          tenancy=$T
           region=$REGION
-          key_file=~/.oci/oci_api_key.pem
+          key_file=$HOME/.oci/oci_api_key.pem
           EOF
-          printf '%s\n' "$OCI_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
+          # Chuan doan an toan: chi do dai + dinh dang, KHONG in du lieu thiet
+          re_ocid='^ocid1\.[a-z0-9]+\.[a-z0-9-]*\.\.'
+          re_fp='^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){15}$'
+          {
+            echo "diag user:        len=${#U} ocid=$([[ $U =~ $re_ocid ]] && echo ok || echo BAD)"
+            echo "diag tenancy:     len=${#T} ocid=$([[ $T =~ $re_ocid ]] && echo ok || echo BAD)"
+            echo "diag fingerprint: len=${#F} fmt=$([[ $F =~ $re_fp ]] && echo ok || echo BAD)"
+            echo "diag key:         len=${#K} pem=$([[ $K == -----BEGIN* ]] && echo ok || echo BAD)"
+          } | tee /tmp/diag.txt
+          # Fail-fast: secret loi thi ket thuc sau 5s thay vi dot vong 5h30 vo ich.
+          BAD=""
+          [[ $U =~ $re_ocid ]]    || BAD="$BAD OCI_USER_OCID(len=${#U})"
+          [[ $T =~ $re_ocid ]]    || BAD="$BAD OCI_TENANCY_OCID(len=${#T})"
+          [[ $F =~ $re_fp   ]]    || BAD="$BAD OCI_FINGERPRINT(len=${#F})"
+          [[ $K == -----BEGIN* ]] || BAD="$BAD OCI_PRIVATE_KEY(len=${#K})"
+          if [ -n "$BAD" ]; then
+            echo "::error::Cac secret sau sai dinh dang hoac de trong:$BAD"
+            echo "::error::Sua tai Settings > Secrets and variables > Actions > Repository secrets. Gia tri CHI lay phan gia tri: dong 'user=ocid1.user.oc1..xxxx' trong ~/.oci/config thi chi paste 'ocid1.user.oc1..xxxx'. Ten secret phai chinh xac: OCI_USER_OCID, OCI_TENANCY_OCID, OCI_FINGERPRINT, OCI_PRIVATE_KEY. Len=0 nghia la secret thieu hoac sai ten."
+            exit 1
+          fi
 
       # state = none | exists | error (chi quan tam pool Micro)
       - name: Check if Micro already exists
@@ -402,6 +488,13 @@ jobs:
           if [ "$STATE" = "exists" ] || [ -z "${IMG_X86:-}" ]; then
             echo "result=nothing" >> "$GITHUB_OUTPUT"; echo "attempts=0" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          # Stagger: pool co STAGGER_SEC > 0 se doi them jitter truoc khi bat dau
+          # loop => request cua 2 pool khong bao gio roinh vao cung mot thoi diem.
+          if [ "${STAGGER_SEC:-0}" != "0" ]; then
+            st=$((STAGGER_SEC + RANDOM % 30))
+            echo "Stagger: cho $st s truoc khi bat dau hunt..."
+            sleep "$st"
+          fi
           end=$(( $(date +%s) + LOOP_MINUTES * 60 ))
           attempt=0
           result="exhausted"
@@ -427,11 +520,13 @@ jobs:
               result="created"; ocid_out="$ocid"
               break
             elif grep -qi 'Out of host capacity' /tmp/launch_err.txt; then
-              echo "attempt #$attempt: no capacity, nghi ${ATTEMPT_INTERVAL_SEC}s"
-              sleep "$ATTEMPT_INTERVAL_SEC"
+              cap=$((ATTEMPT_INTERVAL_SEC - 20 + RANDOM % 41))
+              echo "attempt #$attempt: no capacity, nghi ${cap}s (jitter)"
+              sleep "$cap"
             elif grep -qiE 'TooManyRequests|"status": 429' /tmp/launch_err.txt; then
-              echo "attempt #$attempt: rate limited, nghi ${RATELIMIT_BACKOFF_SEC}s"
-              sleep "$RATELIMIT_BACKOFF_SEC"
+              back=$((RATELIMIT_BACKOFF_SEC - 60 + RANDOM % 121))
+              echo "attempt #$attempt: rate limited, nghi ${back}s (jitter)"
+              sleep "$back"
             else
               echo "attempt #$attempt: loi that, dung loop"
               cp /tmp/oci_error.txt /tmp/oci_error_fatal.txt
@@ -523,6 +618,8 @@ jobs:
             echo "Cac loi thuong gap: sai fingerprint/private key (401), sai OCID/subnet/image (404), vuot han muc (LimitExceeded)."
             echo "Het slot (Out of host capacity) va rate limit KHONG tao issue, do la binh thuong."
           } > /tmp/err_body.md
+          [ -f /tmp/diag.txt ] && { echo; echo '### Diagnostics (chi do dai/dinh dang, khong co du lieu thiet):'; cat /tmp/diag.txt; } >> /tmp/err_body.md || true
+          [ -f /tmp/diag.txt ] && { echo; echo '### Diagnostics (chi do dai/dinh dang, khong co du lieu thiet):'; cat /tmp/diag.txt; } >> /tmp/err_body.md || true
           gh issue create --title "$ERROR_TITLE" --body-file /tmp/err_body.md
 
       # Chi tu disable khi DU CA HAI pool.
