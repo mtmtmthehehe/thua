@@ -319,7 +319,7 @@ jobs:
         run: |
           oci compute instance list --compartment-id "$OCI_TENANCY_OCID" --all > /tmp/final.json 2>/dev/null || true
           a1=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and ((."display-name" == "instance1") or (."display-name" == "arm-free-max")))] | length' /tmp/final.json 2>/dev/null || echo 0)
-          micro=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and (."display-name" == "micro1"))] | length' /tmp/final.json 2>/dev/null || echo 0)
+          micro=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and (."display-name" == "micro2"))] | length' /tmp/final.json 2>/dev/null || echo 0)
           echo "Pool hien tai: A1=${a1:-0}, Micro=${micro:-0}"
           if [ "${a1:-0}" -gt 0 ] && [ "${micro:-0}" -gt 0 ]; then
             gh workflow disable oci-arm-hunt.yml 2>/dev/null || gh workflow disable oci-arm-hunt-v2.yml 2>/dev/null || gh workflow disable "OCI free slot catcher (v5 - A1 song song Micro)"
@@ -376,7 +376,7 @@ jobs:
     env:
       REGION: ap-singapore-1
       AD: 'Ihvr:AP-SINGAPORE-1-AD-1'
-      INSTANCE_NAME: micro1
+      INSTANCE_NAME: micro2
       STAGGER_SEC: '165'
       ATTEMPT_INTERVAL_SEC: '120'
       RATELIMIT_BACKOFF_SEC: '600'
@@ -452,7 +452,7 @@ jobs:
             echo "state=error" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          micro=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and (."display-name" == "micro1"))] | length' /tmp/instances.json)
+          micro=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and (."display-name" == "micro2"))] | length' /tmp/instances.json)
           if [ "${micro:-0}" -gt 0 ]; then
             echo "state=exists" >> "$GITHUB_OUTPUT"
           else
@@ -631,7 +631,7 @@ jobs:
         run: |
           oci compute instance list --compartment-id "$OCI_TENANCY_OCID" --all > /tmp/final.json 2>/dev/null || true
           a1=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and ((."display-name" == "instance1") or (."display-name" == "arm-free-max")))] | length' /tmp/final.json 2>/dev/null || echo 0)
-          micro=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and (."display-name" == "micro1"))] | length' /tmp/final.json 2>/dev/null || echo 0)
+          micro=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and (."display-name" == "micro2"))] | length' /tmp/final.json 2>/dev/null || echo 0)
           echo "Pool hien tai: A1=${a1:-0}, Micro=${micro:-0}"
           if [ "${a1:-0}" -gt 0 ] && [ "${micro:-0}" -gt 0 ]; then
             gh workflow disable oci-arm-hunt.yml 2>/dev/null || gh workflow disable oci-arm-hunt-v2.yml 2>/dev/null || gh workflow disable "OCI free slot catcher (v5 - A1 song song Micro)"
@@ -651,7 +651,7 @@ jobs:
             exit 0
           fi
           if [ "$STATE" = "exists" ]; then
-            summary "### [Micro] EXISTS - da co micro1, job nay khong lam gi them."
+            summary "### [Micro] EXISTS - da co micro2, job nay khong lam gi them."
             exit 1
           fi
           if [ "$RESULT" = "nothing" ]; then
