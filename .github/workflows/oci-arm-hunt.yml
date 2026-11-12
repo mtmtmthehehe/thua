@@ -6,15 +6,14 @@ on:
     branches: [main]
   schedule:
     # === SCHEDULE CHAINING (24/7, khong can cron ngoai) ===
-    # Tick moi 10 phut. Trong khi 1 loop van dang chay (5h30), cac tick moi chi
-    # XEP HANG vao concurrency group (GitHub giu toi da 1 run pending moi group,
-    # run pending cu bi thay the). Loop ket thuc luc nao thi run pending bat
-    # ngay luc do => 2 hunter chay lien tuc 24/7, khong khuyet giay chet nao.
+    # Tick moi 10 phut. Trong khi loop dang chay (5h30), cac tick moi chi
+    # XEP HANG vao concurrency group. Loop ket thuc luc nao thi run pending bat
+    # ngay luc do => hunter chay lien tuc.
     # Dung phut le (4-59/10 = :04 :14 :24...) de tranh slot :00/:30 danh cho job dài.
     # GitHub cron tre 5-20 phut gio cao diem la Binh THUONG - chain chi hoi heng vai phut.
     - cron: '4-59/10 * * * *'
 
-# KHONG con concurrency toan cuc: moi job co nhom rieng, nen 2 hunter khong chan nhau.
+# Concurrency group giu cac run A1 khong chay trung lap.
 # cancel-in-progress: FALSE - bat buoc! Neu de true thi moi dispatch moi se Giet
 # loop dang chay (cron ngoai 4 phut => loop chua bao gio duoc chay het 5h30).
 # Nhung gi do dispatch/schedule khi loop dang chay chi xep hang cho xoi.
@@ -29,7 +28,7 @@ env:
 
 jobs:
   # ============================================================
-  # JOB 1: Hunt A1 (ARM) - chay song song voi hunt-micro
+  # JOB 1: Hunt A1 (ARM)
   # ============================================================
   hunt-a1:
     name: "Hunt A1 (ARM)"
@@ -48,7 +47,7 @@ jobs:
       INSTANCE_NAME: instance1
       FALLBACK_IMG_ARM: 'ocid1.image.oc1.ap-singapore-1.aaaaaaaaw75ef2chh5goomskvdznqz36cadczqelqvndbqcozc5icyig57za'
       SHAPES: |
-        {"ocpus":1,"memoryInGBs":2}
+        {"ocpus":2,"memoryInGBs":12}
       STAGGER_SEC: '0'
       ATTEMPT_INTERVAL_SEC: '120'
       RATELIMIT_BACKOFF_SEC: '600'
@@ -280,7 +279,7 @@ jobs:
             echo "Lay IP trong OCI Console: Compute -> Instances -> $INSTANCE_NAME -> Public IP, roi SSH bang private key cua m."
             echo
             echo "Viec can lam ngay: chay setup-9router-tailscale.sh tren VPS."
-            echo "Workflow tu tat khi DU CA HAI pool (A1 + Micro)."
+            echo "Workflow tu tat sau khi tim thay A1."
           } > /tmp/body.md
           gh issue create --title "$title" --body-file /tmp/body.md
 
@@ -310,7 +309,7 @@ jobs:
           [ -f /tmp/diag.txt ] && { echo; echo '### Diagnostics (chi do dai/dinh dang, khong co du lieu thiet):'; cat /tmp/diag.txt; } >> /tmp/err_body.md || true
           gh issue create --title "$ERROR_TITLE" --body-file /tmp/err_body.md
 
-      # Chi tu disable khi DU CA HAI pool. Muon hunt lai: Actions -> Enable workflow.
+      # Tu disable sau khi A1 da ton tai. Muon hunt lai: Actions -> Enable workflow.
       - name: Final check & self-disable
         if: steps.existing.outputs.state != 'error' && steps.hunt.outputs.result != 'error'
         continue-on-error: true
@@ -319,11 +318,10 @@ jobs:
         run: |
           oci compute instance list --compartment-id "$OCI_TENANCY_OCID" --all > /tmp/final.json 2>/dev/null || true
           a1=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and ((."display-name" == "instance1") or (."display-name" == "arm-free-max")))] | length' /tmp/final.json 2>/dev/null || echo 0)
-          micro=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and (."display-name" == "micro2"))] | length' /tmp/final.json 2>/dev/null || echo 0)
-          echo "Pool hien tai: A1=${a1:-0}, Micro=${micro:-0}"
-          if [ "${a1:-0}" -gt 0 ] && [ "${micro:-0}" -gt 0 ]; then
-            gh workflow disable oci-arm-hunt.yml 2>/dev/null || gh workflow disable oci-arm-hunt-v2.yml 2>/dev/null || gh workflow disable "OCI free slot catcher (v5 - A1 song song Micro)"
-            echo "Da du 2 pool -> workflow bi disable."
+          echo "Pool hien tai: A1=${a1:-0}"
+          if [ "${a1:-0}" -gt 0 ]; then
+            gh workflow disable oci-arm-hunt.yml
+            echo "Da tim thay A1 -> workflow bi disable."
           fi
 
       - name: Final status
@@ -360,317 +358,318 @@ jobs:
           exit 1
 
   # ============================================================
-  # JOB 2: Hunt E2.1.Micro (AMD) - chay song song voi hunt-a1
-  # ============================================================
-  hunt-micro:
-    name: "Hunt Micro (AMD)"
-    runs-on: ubuntu-latest
-    timeout-minutes: 355
-    permissions:
-      contents: read
-      issues: write
-      actions: write
-    concurrency:
-      group: oci-hunt-micro
-      cancel-in-progress: false
-    env:
-      REGION: ap-singapore-1
-      AD: 'Ihvr:AP-SINGAPORE-1-AD-1'
-      INSTANCE_NAME: micro2
-      STAGGER_SEC: '165'
-      ATTEMPT_INTERVAL_SEC: '120'
-      RATELIMIT_BACKOFF_SEC: '600'
-      LOOP_MINUTES: '330'
-    steps:
-      - name: Install OCI CLI
-        run: |
-          pipx install oci-cli || pip install --user --break-system-packages oci-cli
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Write OCI config and API key
-        env:
-          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
-          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
-          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.oci
-          # Lam sach secret: bo \r (paste tu Windows), khoang trang 2 dau,
-          # dau nhay " ' bao quanh, tien to 'user = '/'fingerprint = ' (copy lan
-          # ca ten key tu ~/.oci/config), dau . , ; duoi - nguyen nhan khien
-          # config bi 'malformed'.
-          clean() {
-            printf '%s' "$1" | tr -d '\r' | sed -E -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" -e 's/^(user|tenancy|fingerprint|key)[[:space:]]*=[[:space:]]*//I' -e 's/[.,;]+$//'
-          }
-          U=$(clean "$OCI_USER_OCID")
-          T=$(clean "$OCI_TENANCY_OCID")
-          F=$(clean "$OCI_FINGERPRINT")
-          K=$(printf '%s' "$OCI_PRIVATE_KEY" | tr -d '\r')
-          # Neu key chi la 1 dong (chua co xuong dong that) ma chua chuoi \n thi tach dong
-          [[ $K == *$'\n'* ]] || K=$(printf '%s' "$K" | sed 's/\\n/\n/g')
-          printf '%s\n' "$K" > ~/.oci/oci_api_key.pem
-          cat > ~/.oci/config <<EOF
-          [DEFAULT]
-          user=$U
-          fingerprint=$F
-          tenancy=$T
-          region=$REGION
-          key_file=$HOME/.oci/oci_api_key.pem
-          EOF
-          chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
-          # Chuan doan an toan: chi do dai + dinh dang, KHONG in du lieu thiet
-          re_ocid='^ocid1\.[a-z0-9]+\.[a-z0-9-]*\.\.'
-          re_fp='^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){15}$'
-          {
-            echo "diag user:        len=${#U} ocid=$([[ $U =~ $re_ocid ]] && echo ok || echo BAD)"
-            echo "diag tenancy:     len=${#T} ocid=$([[ $T =~ $re_ocid ]] && echo ok || echo BAD)"
-            echo "diag fingerprint: len=${#F} fmt=$([[ $F =~ $re_fp ]] && echo ok || echo BAD)"
-            echo "diag key:         len=${#K} pem=$([[ $K == -----BEGIN* ]] && echo ok || echo BAD)"
-          } | tee /tmp/diag.txt
-          # Fail-fast: secret loi thi ket thuc sau 5s thay vi dot vong 5h30 vo ich.
-          BAD=""
-          [[ $U =~ $re_ocid ]]    || BAD="$BAD OCI_USER_OCID(len=${#U})"
-          [[ $T =~ $re_ocid ]]    || BAD="$BAD OCI_TENANCY_OCID(len=${#T})"
-          [[ $F =~ $re_fp   ]]    || BAD="$BAD OCI_FINGERPRINT(len=${#F})"
-          [[ $K == -----BEGIN* ]] || BAD="$BAD OCI_PRIVATE_KEY(len=${#K})"
-          if [ -n "$BAD" ]; then
-            echo "::error::Cac secret sau sai dinh dang hoac de trong:$BAD"
-            echo "::error::Sua tai Settings > Secrets and variables > Actions > Repository secrets. Gia tri CHI lay phan gia tri: dong 'user=ocid1.user.oc1..xxxx' trong ~/.oci/config thi chi paste 'ocid1.user.oc1..xxxx'. Ten secret phai chinh xac: OCI_USER_OCID, OCI_TENANCY_OCID, OCI_FINGERPRINT, OCI_PRIVATE_KEY. Len=0 nghia la secret thieu hoac sai ten."
-            exit 1
-          fi
-
-      # state = none | exists | error (chi quan tam pool Micro)
-      - name: Check if Micro already exists
-        id: existing
-        env:
-          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-        run: |
-          if ! oci compute instance list \
-              --compartment-id "$OCI_TENANCY_OCID" \
-              --all > /tmp/instances.json 2>/tmp/check_err.txt; then
-            sed -E 's/ocid1\.[A-Za-z0-9._-]+/<ocid>/g' /tmp/check_err.txt | head -n 25 > /tmp/oci_error.txt
-            echo "state=error" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          micro=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and (."display-name" == "micro2"))] | length' /tmp/instances.json)
-          if [ "${micro:-0}" -gt 0 ]; then
-            echo "state=exists" >> "$GITHUB_OUTPUT"
-          else
-            echo "state=none" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Image x86_64 rieng - KHONG dung image ARM. Neu khong tra duoc image thi bao nothing.
-      - name: Resolve latest Ubuntu x86 image
-        id: images
-        env:
-          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-        run: |
-          img_x86=$(oci compute image list \
-            --compartment-id "$OCI_TENANCY_OCID" \
-            --operating-system "Canonical Ubuntu" \
-            --shape VM.Standard.E2.1.Micro \
-            --sort-by TIMECREATED --sort-order DESC \
-            --query 'data[0].id' --raw-output 2>/dev/null || true)
-          [ "$img_x86" = "null" ] && img_x86=""
-          echo "IMG_X86=$img_x86" >> "$GITHUB_ENV"
-
-      # result = created | error | exhausted | nothing. Micro KHONG truyen --shape-config.
-      - name: Hunt loop (Micro)
-        if: steps.existing.outputs.state != 'error'
-        id: hunt
-        env:
-          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-          OCI_SUBNET_OCID: ${{ secrets.OCI_SUBNET_OCID }}
-          SSH_PUBKEY: 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC/G1PiSvvNMAmD9aD06lBedTpVncbQeYYwYDA3IM5mWAGSK0HxIrgY0YkmJeLl541Fjpbdi+i2om9teeJHFoyHTxIauIX+8FPDR1o8cMdjIRXTaR4np8cgz9V1TLwRM2hvT5sgYhJu3xAhAQsW2NioYg+wZbLfvPRm5BGT/1bXUIruIs4YyzqHmD+7u4CjBRG895EECgNE7T41raemT2n8SE7Fun+3SRj5LSl8uWdYzVMt5lVS5BKs/fJRdN7u0NOFnMKSgoa5En4SHUB5qSIdPNbphfTI7J9oLLcvUQEGAGZTn/NGgjMHIgATqTYp/Qa3RlBARmdVxajkyvvL3gp9 ssh-key-2026-10-24'
-          STATE: ${{ steps.existing.outputs.state }}
-        run: |
-          set +e
-          if [ "$STATE" = "exists" ] || [ -z "${IMG_X86:-}" ]; then
-            echo "result=nothing" >> "$GITHUB_OUTPUT"; echo "attempts=0" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          # Stagger: pool co STAGGER_SEC > 0 se doi them jitter truoc khi bat dau
-          # loop => request cua 2 pool khong bao gio roinh vao cung mot thoi diem.
-          if [ "${STAGGER_SEC:-0}" != "0" ]; then
-            st=$((STAGGER_SEC + RANDOM % 30))
-            echo "Stagger: cho $st s truoc khi bat dau hunt..."
-            sleep "$st"
-          fi
-          end=$(( $(date +%s) + LOOP_MINUTES * 60 ))
-          attempt=0
-          result="exhausted"
-          ocid_out=""
-          while [ "$(date +%s)" -lt "$end" ]; do
-            attempt=$((attempt + 1))
-            echo "::group::Attempt #$attempt [Micro] $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            ocid=$(oci compute instance launch \
-              --availability-domain "$AD" \
-              --compartment-id "$OCI_TENANCY_OCID" \
-              --display-name "$INSTANCE_NAME" \
-              --shape VM.Standard.E2.1.Micro \
-              --image-id "$IMG_X86" \
-              --subnet-id "$OCI_SUBNET_OCID" \
-              --assign-public-ip true \
-              --metadata "{\"ssh_authorized_keys\": \"$SSH_PUBKEY\"}" \
-              --query 'data.id' --raw-output 2>/tmp/launch_err.txt)
-            rc=$?
-            sed -E 's/ocid1\.[A-Za-z0-9._-]+/<ocid>/g' /tmp/launch_err.txt | head -n 25 > /tmp/oci_error.txt
-            echo "::endgroup::"
-            if [ $rc -eq 0 ] && [ -n "$ocid" ] && [ "$ocid" != "null" ]; then
-              echo "attempt #$attempt: CREATED"
-              result="created"; ocid_out="$ocid"
-              break
-            elif grep -qi 'Out of host capacity' /tmp/launch_err.txt; then
-              cap=$((ATTEMPT_INTERVAL_SEC - 20 + RANDOM % 41))
-              echo "attempt #$attempt: no capacity, nghi ${cap}s (jitter)"
-              sleep "$cap"
-            elif grep -qiE 'TooManyRequests|"status": 429' /tmp/launch_err.txt; then
-              back=$((RATELIMIT_BACKOFF_SEC - 60 + RANDOM % 121))
-              echo "attempt #$attempt: rate limited, nghi ${back}s (jitter)"
-              sleep "$back"
-            else
-              echo "attempt #$attempt: loi that, dung loop"
-              cp /tmp/oci_error.txt /tmp/oci_error_fatal.txt
-              result="error"
-              break
-            fi
-          done
-          echo "result=$result" >> "$GITHUB_OUTPUT"
-          echo "ocid=$ocid_out" >> "$GITHUB_OUTPUT"
-          echo "attempts=$attempt" >> "$GITHUB_OUTPUT"
-          exit 0
-
-      - name: Resize boot volume to 50GB
-        # Chay ca khi state=exists: neu run truoc bi kill ngay sau khi OCI da
-        # chap nhan tao instance thi lan nay se resize bu cho dung luong.
-        if: steps.hunt.outputs.result == 'created' || steps.existing.outputs.state == 'exists'
-        continue-on-error: true
-        env:
-          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-          OCID: ${{ steps.hunt.outputs.ocid }}
-        run: |
-          bvid=""
-          for i in 1 2 3 4 5 6; do
-            bvid=$(oci compute boot-volume-attachment list \
-              --compartment-id "$OCI_TENANCY_OCID" \
-              --availability-domain "$AD" \
-              --instance-id "$OCID" \
-              --query 'data[0]."boot-volume-id"' --raw-output 2>/dev/null || true)
-            [ -n "$bvid" ] && [ "$bvid" != "null" ] && break
-            sleep 20
-          done
-          if [ -n "$bvid" ] && [ "$bvid" != "null" ]; then
-            oci bv boot-volume update --boot-volume-id "$bvid" --size-in-gbs 50 \
-              && echo "RESIZED=yes" >> "$GITHUB_ENV" \
-              || { echo "::warning title=Boot volume resize failed::Lam tay trong OCI Console"; echo "RESIZED=no" >> "$GITHUB_ENV"; }
-          else
-            echo "::warning title=Boot volume not found::Lam tay trong OCI Console"
-            echo "RESIZED=no" >> "$GITHUB_ENV"
-          fi
-
-      - name: Open success issue
-        if: steps.hunt.outputs.result == 'created' || steps.existing.outputs.state == 'exists'
-        env:
-          ATTEMPTS: ${{ steps.hunt.outputs.attempts }}
-        run: |
-          title="$SUCCESS_TITLE - $INSTANCE_NAME"
-          n=$(gh issue list --state all --search "\"$title\" in:title" --json number --jq length)
-          if [ "$n" != "0" ]; then
-            echo "Success issue for $INSTANCE_NAME already exists, skipping."
-            exit 0
-          fi
-          if [ "${RESIZED:-no}" = "yes" ]; then
-            vol="Boot volume da duoc mo rong len 50GB."
-          else
-            vol="Boot volume CHUA mo rong duoc, lam tay trong OCI Console."
-          fi
-          {
-            echo "Instance $INSTANCE_NAME (VM.Standard.E2.1.Micro, 1GB RAM) da ton tai ($(date -u '+%Y-%m-%d %H:%M UTC')), so attempt: ${ATTEMPTS:-n/a}."
-            echo
-            echo "$vol"
-            echo
-            echo "Khong ghi IP/OCID o day vi repo public."
-            echo "Lay IP trong OCI Console: Compute -> Instances -> $INSTANCE_NAME -> Public IP, roi SSH bang private key cua m."
-            echo
-            echo "Viec can lam ngay: chay setup-9router-tailscale.sh tren VPS (nho 1GB RAM nen buoc swap trong script la BAT BUOC)."
-            echo "Workflow tu tat khi DU CA HAI pool (A1 + Micro)."
-          } > /tmp/body.md
-          gh issue create --title "$title" --body-file /tmp/body.md
-
-      - name: Open error issue
-        if: steps.existing.outputs.state == 'error' || steps.hunt.outputs.result == 'error'
-        env:
-          WHERE: ${{ steps.existing.outputs.state == 'error' && 'kiem tra instance (oci compute instance list)' || 'tao instance (oci compute instance launch)' }}
-        run: |
-          n=$(gh issue list --state open --search "\"$ERROR_TITLE\" in:title" --json number --jq length)
-          if [ "$n" != "0" ]; then
-            echo "Error issue already open, skipping."
-            exit 0
-          fi
-          {
-            echo "Job hunt-micro gap loi o buoc: $WHERE"
-            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo
-            echo "Loi tu OCI (da xoa OCID):"
-            echo '```'
-            cat /tmp/oci_error_fatal.txt 2>/dev/null || cat /tmp/oci_error.txt 2>/dev/null
-            echo '```'
-            echo
-            echo "Cac loi thuong gap: sai fingerprint/private key (401), sai OCID/subnet/image (404), vuot han muc (LimitExceeded)."
-            echo "Het slot (Out of host capacity) va rate limit KHONG tao issue, do la binh thuong."
-          } > /tmp/err_body.md
-          [ -f /tmp/diag.txt ] && { echo; echo '### Diagnostics (chi do dai/dinh dang, khong co du lieu thiet):'; cat /tmp/diag.txt; } >> /tmp/err_body.md || true
-          [ -f /tmp/diag.txt ] && { echo; echo '### Diagnostics (chi do dai/dinh dang, khong co du lieu thiet):'; cat /tmp/diag.txt; } >> /tmp/err_body.md || true
-          gh issue create --title "$ERROR_TITLE" --body-file /tmp/err_body.md
-
-      # Chi tu disable khi DU CA HAI pool.
-      - name: Final check & self-disable
-        if: steps.existing.outputs.state != 'error' && steps.hunt.outputs.result != 'error'
-        continue-on-error: true
-        env:
-          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-        run: |
-          oci compute instance list --compartment-id "$OCI_TENANCY_OCID" --all > /tmp/final.json 2>/dev/null || true
-          a1=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and ((."display-name" == "instance1") or (."display-name" == "arm-free-max")))] | length' /tmp/final.json 2>/dev/null || echo 0)
-          micro=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and (."display-name" == "micro2"))] | length' /tmp/final.json 2>/dev/null || echo 0)
-          echo "Pool hien tai: A1=${a1:-0}, Micro=${micro:-0}"
-          if [ "${a1:-0}" -gt 0 ] && [ "${micro:-0}" -gt 0 ]; then
-            gh workflow disable oci-arm-hunt.yml 2>/dev/null || gh workflow disable oci-arm-hunt-v2.yml 2>/dev/null || gh workflow disable "OCI free slot catcher (v5 - A1 song song Micro)"
-            echo "Da du 2 pool -> workflow bi disable."
-          fi
-
-      - name: Final status
-        if: always()
-        env:
-          STATE: ${{ steps.existing.outputs.state }}
-          RESULT: ${{ steps.hunt.outputs.result }}
-          ATTEMPTS: ${{ steps.hunt.outputs.attempts }}
-        run: |
-          summary() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
-          if [ "$RESULT" = "created" ]; then
-            summary "### [Micro] CREATED sau ${ATTEMPTS} attempt - xem issue trong tab Issues"
-            exit 0
-          fi
-          if [ "$STATE" = "exists" ]; then
-            summary "### [Micro] EXISTS - da co micro2, job nay khong lam gi them."
-            exit 1
-          fi
-          if [ "$RESULT" = "nothing" ]; then
-            summary "### [Micro] BO QUA - da co instance hoac khong tra duoc image x86 (kiem tra OS filter/region)."
-            exit 1
-          fi
-          if [ "$RESULT" = "exhausted" ]; then
-            summary "### [Micro] NO CAPACITY - ${ATTEMPTS} attempt trong ~5h30 deu het slot. Run sau tu chay sau 6h."
-            exit 1
-          fi
-          if [ "$RESULT" = "error" ]; then
-            summary "### [Micro] REAL ERROR sau ${ATTEMPTS} attempt:"
-            summary '```'
-            summary "$(cat /tmp/oci_error_fatal.txt 2>/dev/null)"
-            summary '```'
-            exit 1
-          fi
-          summary "### [Micro] REAL ERROR o buoc kiem tra instance (auth/config/mang):"
-          summary '```'
-          summary "$(cat /tmp/oci_error.txt 2>/dev/null)"
-          summary '```'
-          exit 1
+  # Micro hunt intentionally disabled; only A1 (2 OCPU / 12 GB) remains active.
+#   # JOB 2: Hunt E2.1.Micro (AMD) - chay song song voi hunt-a1
+#   # ============================================================
+#   hunt-micro:
+#     name: "Hunt Micro (AMD)"
+#     runs-on: ubuntu-latest
+#     timeout-minutes: 355
+#     permissions:
+#       contents: read
+#       issues: write
+#       actions: write
+#     concurrency:
+#       group: oci-hunt-micro
+#       cancel-in-progress: false
+#     env:
+#       REGION: ap-singapore-1
+#       AD: 'Ihvr:AP-SINGAPORE-1-AD-1'
+#       INSTANCE_NAME: micro2
+#       STAGGER_SEC: '165'
+#       ATTEMPT_INTERVAL_SEC: '120'
+#       RATELIMIT_BACKOFF_SEC: '600'
+#       LOOP_MINUTES: '330'
+#     steps:
+#       - name: Install OCI CLI
+#         run: |
+#           pipx install oci-cli || pip install --user --break-system-packages oci-cli
+#           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+#
+#       - name: Write OCI config and API key
+#         env:
+#           OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+#           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+#           OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+#           OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+#         run: |
+#           mkdir -p ~/.oci
+#           # Lam sach secret: bo \r (paste tu Windows), khoang trang 2 dau,
+#           # dau nhay " ' bao quanh, tien to 'user = '/'fingerprint = ' (copy lan
+#           # ca ten key tu ~/.oci/config), dau . , ; duoi - nguyen nhan khien
+#           # config bi 'malformed'.
+#           clean() {
+#             printf '%s' "$1" | tr -d '\r' | sed -E -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" -e 's/^(user|tenancy|fingerprint|key)[[:space:]]*=[[:space:]]*//I' -e 's/[.,;]+$//'
+#           }
+#           U=$(clean "$OCI_USER_OCID")
+#           T=$(clean "$OCI_TENANCY_OCID")
+#           F=$(clean "$OCI_FINGERPRINT")
+#           K=$(printf '%s' "$OCI_PRIVATE_KEY" | tr -d '\r')
+#           # Neu key chi la 1 dong (chua co xuong dong that) ma chua chuoi \n thi tach dong
+#           [[ $K == *$'\n'* ]] || K=$(printf '%s' "$K" | sed 's/\\n/\n/g')
+#           printf '%s\n' "$K" > ~/.oci/oci_api_key.pem
+#           cat > ~/.oci/config <<EOF
+#           [DEFAULT]
+#           user=$U
+#           fingerprint=$F
+#           tenancy=$T
+#           region=$REGION
+#           key_file=$HOME/.oci/oci_api_key.pem
+#           EOF
+#           chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
+#           # Chuan doan an toan: chi do dai + dinh dang, KHONG in du lieu thiet
+#           re_ocid='^ocid1\.[a-z0-9]+\.[a-z0-9-]*\.\.'
+#           re_fp='^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){15}$'
+#           {
+#             echo "diag user:        len=${#U} ocid=$([[ $U =~ $re_ocid ]] && echo ok || echo BAD)"
+#             echo "diag tenancy:     len=${#T} ocid=$([[ $T =~ $re_ocid ]] && echo ok || echo BAD)"
+#             echo "diag fingerprint: len=${#F} fmt=$([[ $F =~ $re_fp ]] && echo ok || echo BAD)"
+#             echo "diag key:         len=${#K} pem=$([[ $K == -----BEGIN* ]] && echo ok || echo BAD)"
+#           } | tee /tmp/diag.txt
+#           # Fail-fast: secret loi thi ket thuc sau 5s thay vi dot vong 5h30 vo ich.
+#           BAD=""
+#           [[ $U =~ $re_ocid ]]    || BAD="$BAD OCI_USER_OCID(len=${#U})"
+#           [[ $T =~ $re_ocid ]]    || BAD="$BAD OCI_TENANCY_OCID(len=${#T})"
+#           [[ $F =~ $re_fp   ]]    || BAD="$BAD OCI_FINGERPRINT(len=${#F})"
+#           [[ $K == -----BEGIN* ]] || BAD="$BAD OCI_PRIVATE_KEY(len=${#K})"
+#           if [ -n "$BAD" ]; then
+#             echo "::error::Cac secret sau sai dinh dang hoac de trong:$BAD"
+#             echo "::error::Sua tai Settings > Secrets and variables > Actions > Repository secrets. Gia tri CHI lay phan gia tri: dong 'user=ocid1.user.oc1..xxxx' trong ~/.oci/config thi chi paste 'ocid1.user.oc1..xxxx'. Ten secret phai chinh xac: OCI_USER_OCID, OCI_TENANCY_OCID, OCI_FINGERPRINT, OCI_PRIVATE_KEY. Len=0 nghia la secret thieu hoac sai ten."
+#             exit 1
+#           fi
+#
+#       # state = none | exists | error (chi quan tam pool Micro)
+#       - name: Check if Micro already exists
+#         id: existing
+#         env:
+#           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+#         run: |
+#           if ! oci compute instance list \
+#               --compartment-id "$OCI_TENANCY_OCID" \
+#               --all > /tmp/instances.json 2>/tmp/check_err.txt; then
+#             sed -E 's/ocid1\.[A-Za-z0-9._-]+/<ocid>/g' /tmp/check_err.txt | head -n 25 > /tmp/oci_error.txt
+#             echo "state=error" >> "$GITHUB_OUTPUT"
+#             exit 0
+#           fi
+#           micro=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and (."display-name" == "micro2"))] | length' /tmp/instances.json)
+#           if [ "${micro:-0}" -gt 0 ]; then
+#             echo "state=exists" >> "$GITHUB_OUTPUT"
+#           else
+#             echo "state=none" >> "$GITHUB_OUTPUT"
+#           fi
+#
+#       # Image x86_64 rieng - KHONG dung image ARM. Neu khong tra duoc image thi bao nothing.
+#       - name: Resolve latest Ubuntu x86 image
+#         id: images
+#         env:
+#           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+#         run: |
+#           img_x86=$(oci compute image list \
+#             --compartment-id "$OCI_TENANCY_OCID" \
+#             --operating-system "Canonical Ubuntu" \
+#             --shape VM.Standard.E2.1.Micro \
+#             --sort-by TIMECREATED --sort-order DESC \
+#             --query 'data[0].id' --raw-output 2>/dev/null || true)
+#           [ "$img_x86" = "null" ] && img_x86=""
+#           echo "IMG_X86=$img_x86" >> "$GITHUB_ENV"
+#
+#       # result = created | error | exhausted | nothing. Micro KHONG truyen --shape-config.
+#       - name: Hunt loop (Micro)
+#         if: steps.existing.outputs.state != 'error'
+#         id: hunt
+#         env:
+#           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+#           OCI_SUBNET_OCID: ${{ secrets.OCI_SUBNET_OCID }}
+#           SSH_PUBKEY: 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC/G1PiSvvNMAmD9aD06lBedTpVncbQeYYwYDA3IM5mWAGSK0HxIrgY0YkmJeLl541Fjpbdi+i2om9teeJHFoyHTxIauIX+8FPDR1o8cMdjIRXTaR4np8cgz9V1TLwRM2hvT5sgYhJu3xAhAQsW2NioYg+wZbLfvPRm5BGT/1bXUIruIs4YyzqHmD+7u4CjBRG895EECgNE7T41raemT2n8SE7Fun+3SRj5LSl8uWdYzVMt5lVS5BKs/fJRdN7u0NOFnMKSgoa5En4SHUB5qSIdPNbphfTI7J9oLLcvUQEGAGZTn/NGgjMHIgATqTYp/Qa3RlBARmdVxajkyvvL3gp9 ssh-key-2026-10-24'
+#           STATE: ${{ steps.existing.outputs.state }}
+#         run: |
+#           set +e
+#           if [ "$STATE" = "exists" ] || [ -z "${IMG_X86:-}" ]; then
+#             echo "result=nothing" >> "$GITHUB_OUTPUT"; echo "attempts=0" >> "$GITHUB_OUTPUT"; exit 0
+#           fi
+#           # Stagger: pool co STAGGER_SEC > 0 se doi them jitter truoc khi bat dau
+#           # loop => request cua 2 pool khong bao gio roinh vao cung mot thoi diem.
+#           if [ "${STAGGER_SEC:-0}" != "0" ]; then
+#             st=$((STAGGER_SEC + RANDOM % 30))
+#             echo "Stagger: cho $st s truoc khi bat dau hunt..."
+#             sleep "$st"
+#           fi
+#           end=$(( $(date +%s) + LOOP_MINUTES * 60 ))
+#           attempt=0
+#           result="exhausted"
+#           ocid_out=""
+#           while [ "$(date +%s)" -lt "$end" ]; do
+#             attempt=$((attempt + 1))
+#             echo "::group::Attempt #$attempt [Micro] $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+#             ocid=$(oci compute instance launch \
+#               --availability-domain "$AD" \
+#               --compartment-id "$OCI_TENANCY_OCID" \
+#               --display-name "$INSTANCE_NAME" \
+#               --shape VM.Standard.E2.1.Micro \
+#               --image-id "$IMG_X86" \
+#               --subnet-id "$OCI_SUBNET_OCID" \
+#               --assign-public-ip true \
+#               --metadata "{\"ssh_authorized_keys\": \"$SSH_PUBKEY\"}" \
+#               --query 'data.id' --raw-output 2>/tmp/launch_err.txt)
+#             rc=$?
+#             sed -E 's/ocid1\.[A-Za-z0-9._-]+/<ocid>/g' /tmp/launch_err.txt | head -n 25 > /tmp/oci_error.txt
+#             echo "::endgroup::"
+#             if [ $rc -eq 0 ] && [ -n "$ocid" ] && [ "$ocid" != "null" ]; then
+#               echo "attempt #$attempt: CREATED"
+#               result="created"; ocid_out="$ocid"
+#               break
+#             elif grep -qi 'Out of host capacity' /tmp/launch_err.txt; then
+#               cap=$((ATTEMPT_INTERVAL_SEC - 20 + RANDOM % 41))
+#               echo "attempt #$attempt: no capacity, nghi ${cap}s (jitter)"
+#               sleep "$cap"
+#             elif grep -qiE 'TooManyRequests|"status": 429' /tmp/launch_err.txt; then
+#               back=$((RATELIMIT_BACKOFF_SEC - 60 + RANDOM % 121))
+#               echo "attempt #$attempt: rate limited, nghi ${back}s (jitter)"
+#               sleep "$back"
+#             else
+#               echo "attempt #$attempt: loi that, dung loop"
+#               cp /tmp/oci_error.txt /tmp/oci_error_fatal.txt
+#               result="error"
+#               break
+#             fi
+#           done
+#           echo "result=$result" >> "$GITHUB_OUTPUT"
+#           echo "ocid=$ocid_out" >> "$GITHUB_OUTPUT"
+#           echo "attempts=$attempt" >> "$GITHUB_OUTPUT"
+#           exit 0
+#
+#       - name: Resize boot volume to 50GB
+#         # Chay ca khi state=exists: neu run truoc bi kill ngay sau khi OCI da
+#         # chap nhan tao instance thi lan nay se resize bu cho dung luong.
+#         if: steps.hunt.outputs.result == 'created' || steps.existing.outputs.state == 'exists'
+#         continue-on-error: true
+#         env:
+#           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+#           OCID: ${{ steps.hunt.outputs.ocid }}
+#         run: |
+#           bvid=""
+#           for i in 1 2 3 4 5 6; do
+#             bvid=$(oci compute boot-volume-attachment list \
+#               --compartment-id "$OCI_TENANCY_OCID" \
+#               --availability-domain "$AD" \
+#               --instance-id "$OCID" \
+#               --query 'data[0]."boot-volume-id"' --raw-output 2>/dev/null || true)
+#             [ -n "$bvid" ] && [ "$bvid" != "null" ] && break
+#             sleep 20
+#           done
+#           if [ -n "$bvid" ] && [ "$bvid" != "null" ]; then
+#             oci bv boot-volume update --boot-volume-id "$bvid" --size-in-gbs 50 \
+#               && echo "RESIZED=yes" >> "$GITHUB_ENV" \
+#               || { echo "::warning title=Boot volume resize failed::Lam tay trong OCI Console"; echo "RESIZED=no" >> "$GITHUB_ENV"; }
+#           else
+#             echo "::warning title=Boot volume not found::Lam tay trong OCI Console"
+#             echo "RESIZED=no" >> "$GITHUB_ENV"
+#           fi
+#
+#       - name: Open success issue
+#         if: steps.hunt.outputs.result == 'created' || steps.existing.outputs.state == 'exists'
+#         env:
+#           ATTEMPTS: ${{ steps.hunt.outputs.attempts }}
+#         run: |
+#           title="$SUCCESS_TITLE - $INSTANCE_NAME"
+#           n=$(gh issue list --state all --search "\"$title\" in:title" --json number --jq length)
+#           if [ "$n" != "0" ]; then
+#             echo "Success issue for $INSTANCE_NAME already exists, skipping."
+#             exit 0
+#           fi
+#           if [ "${RESIZED:-no}" = "yes" ]; then
+#             vol="Boot volume da duoc mo rong len 50GB."
+#           else
+#             vol="Boot volume CHUA mo rong duoc, lam tay trong OCI Console."
+#           fi
+#           {
+#             echo "Instance $INSTANCE_NAME (VM.Standard.E2.1.Micro, 1GB RAM) da ton tai ($(date -u '+%Y-%m-%d %H:%M UTC')), so attempt: ${ATTEMPTS:-n/a}."
+#             echo
+#             echo "$vol"
+#             echo
+#             echo "Khong ghi IP/OCID o day vi repo public."
+#             echo "Lay IP trong OCI Console: Compute -> Instances -> $INSTANCE_NAME -> Public IP, roi SSH bang private key cua m."
+#             echo
+#             echo "Viec can lam ngay: chay setup-9router-tailscale.sh tren VPS (nho 1GB RAM nen buoc swap trong script la BAT BUOC)."
+#             echo "Workflow tu tat khi DU CA HAI pool (A1 + Micro)."
+#           } > /tmp/body.md
+#           gh issue create --title "$title" --body-file /tmp/body.md
+#
+#       - name: Open error issue
+#         if: steps.existing.outputs.state == 'error' || steps.hunt.outputs.result == 'error'
+#         env:
+#           WHERE: ${{ steps.existing.outputs.state == 'error' && 'kiem tra instance (oci compute instance list)' || 'tao instance (oci compute instance launch)' }}
+#         run: |
+#           n=$(gh issue list --state open --search "\"$ERROR_TITLE\" in:title" --json number --jq length)
+#           if [ "$n" != "0" ]; then
+#             echo "Error issue already open, skipping."
+#             exit 0
+#           fi
+#           {
+#             echo "Job hunt-micro gap loi o buoc: $WHERE"
+#             echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+#             echo
+#             echo "Loi tu OCI (da xoa OCID):"
+#             echo '```'
+#             cat /tmp/oci_error_fatal.txt 2>/dev/null || cat /tmp/oci_error.txt 2>/dev/null
+#             echo '```'
+#             echo
+#             echo "Cac loi thuong gap: sai fingerprint/private key (401), sai OCID/subnet/image (404), vuot han muc (LimitExceeded)."
+#             echo "Het slot (Out of host capacity) va rate limit KHONG tao issue, do la binh thuong."
+#           } > /tmp/err_body.md
+#           [ -f /tmp/diag.txt ] && { echo; echo '### Diagnostics (chi do dai/dinh dang, khong co du lieu thiet):'; cat /tmp/diag.txt; } >> /tmp/err_body.md || true
+#           [ -f /tmp/diag.txt ] && { echo; echo '### Diagnostics (chi do dai/dinh dang, khong co du lieu thiet):'; cat /tmp/diag.txt; } >> /tmp/err_body.md || true
+#           gh issue create --title "$ERROR_TITLE" --body-file /tmp/err_body.md
+#
+#       # Chi tu disable khi DU CA HAI pool.
+#       - name: Final check & self-disable
+#         if: steps.existing.outputs.state != 'error' && steps.hunt.outputs.result != 'error'
+#         continue-on-error: true
+#         env:
+#           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+#         run: |
+#           oci compute instance list --compartment-id "$OCI_TENANCY_OCID" --all > /tmp/final.json 2>/dev/null || true
+#           a1=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and ((."display-name" == "instance1") or (."display-name" == "arm-free-max")))] | length' /tmp/final.json 2>/dev/null || echo 0)
+#           micro=$(jq -r '[.data[]? | select((."lifecycle-state" != "TERMINATED") and (."lifecycle-state" != "TERMINATING") and (."display-name" == "micro2"))] | length' /tmp/final.json 2>/dev/null || echo 0)
+#           echo "Pool hien tai: A1=${a1:-0}, Micro=${micro:-0}"
+#           if [ "${a1:-0}" -gt 0 ] && [ "${micro:-0}" -gt 0 ]; then
+#             gh workflow disable oci-arm-hunt.yml 2>/dev/null || gh workflow disable oci-arm-hunt-v2.yml 2>/dev/null || gh workflow disable "OCI free slot catcher (v5 - A1 song song Micro)"
+#             echo "Da du 2 pool -> workflow bi disable."
+#           fi
+#
+#       - name: Final status
+#         if: always()
+#         env:
+#           STATE: ${{ steps.existing.outputs.state }}
+#           RESULT: ${{ steps.hunt.outputs.result }}
+#           ATTEMPTS: ${{ steps.hunt.outputs.attempts }}
+#         run: |
+#           summary() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+#           if [ "$RESULT" = "created" ]; then
+#             summary "### [Micro] CREATED sau ${ATTEMPTS} attempt - xem issue trong tab Issues"
+#             exit 0
+#           fi
+#           if [ "$STATE" = "exists" ]; then
+#             summary "### [Micro] EXISTS - da co micro2, job nay khong lam gi them."
+#             exit 1
+#           fi
+#           if [ "$RESULT" = "nothing" ]; then
+#             summary "### [Micro] BO QUA - da co instance hoac khong tra duoc image x86 (kiem tra OS filter/region)."
+#             exit 1
+#           fi
+#           if [ "$RESULT" = "exhausted" ]; then
+#             summary "### [Micro] NO CAPACITY - ${ATTEMPTS} attempt trong ~5h30 deu het slot. Run sau tu chay sau 6h."
+#             exit 1
+#           fi
+#           if [ "$RESULT" = "error" ]; then
+#             summary "### [Micro] REAL ERROR sau ${ATTEMPTS} attempt:"
+#             summary '```'
+#             summary "$(cat /tmp/oci_error_fatal.txt 2>/dev/null)"
+#             summary '```'
+#             exit 1
+#           fi
+#           summary "### [Micro] REAL ERROR o buoc kiem tra instance (auth/config/mang):"
+#           summary '```'
+#           summary "$(cat /tmp/oci_error.txt 2>/dev/null)"
+#           summary '```'
+#           exit 1
